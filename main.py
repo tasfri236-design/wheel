@@ -1,7 +1,12 @@
-from gpiozero import PWMOutputDevice, DigitalOutputDevice, RotaryEncoder
-from time import sleep, time
+import board
+import busio
+import math
 import threading
 import sys
+from time import sleep, time
+from gpiozero import PWMOutputDevice, DigitalOutputDevice, RotaryEncoder
+from adafruit_bno08x.i2c import BNO08X_I2C
+from adafruit_bno08x import BNO_REPORT_GYROSCOPE
 
 # --- 1. Pin Declarations (BCM GPIO) ---
 RPWM_GPIO = 12  
@@ -12,18 +17,30 @@ ENC_A_GPIO = 22
 ENC_B_GPIO = 23 
 
 # --- 2. Hardware Setup ---
-# 1000Hz frequency for REV HD Hex Motor
 rpwm = PWMOutputDevice(RPWM_GPIO, frequency=1000)
 lpwm = PWMOutputDevice(LPWM_GPIO, frequency=1000)
 r_en = DigitalOutputDevice(R_EN_GPIO)
 l_en = DigitalOutputDevice(L_EN_GPIO)
 encoder = RotaryEncoder(ENC_A_GPIO, ENC_B_GPIO, max_steps=0)
 
-# --- 3. PD Constants & State ---
+# --- 3. IMU Setup ---
+try:
+    import board
+    i2c = board.I2C()
+    bno = BNO08X_I2C(i2c)
+    bno.enable_feature(BNO_REPORT_GYROSCOPE)
+    imu_connected = True
+    print(">> BNO085 IMU Online (45° Tilt Compensation Active)")
+except Exception as e:
+    print(f">> IMU Error: {e}")
+    imu_connected = False
+
+# --- 4. Constants & State ---
 kp = 0.8  
 kd = 0.2  
-TICKS_PER_REV = 360 
+TICKS_PER_REV = 360    
 MAX_ATTAINABLE_RPM = 100
+TILT_ANGLE = math.radians(45) # Pre-calculate radians
 
 target_rpm = 0
 current_dir = "brake"
@@ -60,7 +77,6 @@ def motor_control_loop():
             rpwm.value = 0
             lpwm.value = 0
             current_duty_cycle = 0
-            # Reset error so it doesn't "jump" when restarted
             prev_error = 0 
         
         # 3. Case: Spin (CW or CCW)
@@ -71,7 +87,6 @@ def motor_control_loop():
             # PD Math
             error = target_rpm - current_rpm
             derivative = (error - prev_error) / dt if dt > 0 else 0
-            
             output = (kp * error) + (kd * derivative)
             
             # Adjustment logic
@@ -87,14 +102,37 @@ def motor_control_loop():
 
             prev_error = error
 
-        # --- Throttled Printing ---
-        # Move this here so it prints even when target is 0/brake
+        # --- Throttled Printing (Every 1 second) ---
         k += 1
-        if k % 20 == 0 and current_dir!="brake": # Print every 1 second (20 * 0.05s)
+        if k % 20 == 0 and current_dir != "brake":
             status = current_dir.upper() if target_rpm > 0 else "IDLE"
-            print(f"[{status}] Target: {target_rpm} | Actual: {current_rpm:.2f} RPM | PWM: {current_duty_cycle:.2%}")
+            
+            # Calculate True Yaw from Tilted IMU
+            true_yaw = 0.0
+            if imu_connected:
+                try:
+                    gx, gy, gz = bno.gyro
+                    # Tilted around X-axis: Combine Z and Y
+                    true_yaw = (gz * math.cos(TILT_ANGLE)) - (gy * math.sin(TILT_ANGLE))
+                except:
+                    print("Hello")
+                    pass # Skip if I2C read fails briefly
+
+            print(f"[{status}] Motor: {current_rpm:6.1f} RPM | Duty: {current_duty_cycle:5.1%} | Platform Yaw: {true_yaw:6.3f} rad/s")
         
         sleep(0.05) 
+
+def maintain():
+    while True: 
+        gx, gy, gz = bno.gyro
+        # Tilted around X-axis: Combine Z and Y
+        true_yaw = (gz * math.cos(TILT_ANGLE)) - (gy * math.sin(TILT_ANGLE))
+        if(true_yaw>0):
+            current_dir="brake"
+            print("break")
+            motor_control_loop()
+            break
+    return
 
 def main():
     global target_rpm, current_dir
@@ -102,7 +140,7 @@ def main():
     motor_thread = threading.Thread(target=motor_control_loop, daemon=True)
     motor_thread.start()
 
-    print("--- Reaction Wheel System Online ---")
+    print("\n--- Reaction Wheel System Online ---")
     print("Commands: '100 cw', '50 ccw', 'brake'")
 
     try:
@@ -112,7 +150,7 @@ def main():
             if cmd_input == "brake":
                 target_rpm = 0
                 current_dir = "brake"
-                print(">> Command: BRAKE")
+                print(">> Action: BRAKING")
             else:
                 try:
                     parts = cmd_input.split()
@@ -125,8 +163,7 @@ def main():
                     if 0 <= speed <= MAX_ATTAINABLE_RPM and direction in ["cw", "ccw"]:
                         target_rpm = speed
                         current_dir = direction
-                        # Reset duty cycle for a fresh start when changing direction
-                        current_duty_cycle = 0 
+                        current_duty_cycle = 0 # Fresh start for direction change
                     else:
                         print(f"Invalid input. Limit: {MAX_ATTAINABLE_RPM} RPM.")
                 
@@ -134,7 +171,7 @@ def main():
                     print("Error: Speed must be a number.")
 
     except KeyboardInterrupt:
-        print("\nExiting...")
+        print("\nShutting down safely...")
     finally:
         rpwm.value = 0
         lpwm.value = 0
