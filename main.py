@@ -3,29 +3,28 @@ from time import sleep, time
 import threading
 import sys
 
-# --- 1. Pin Declarations (Using BCM GPIO Numbers) ---
-# Note: Physical Pin 32 is GPIO 12, Physical Pin 33 is GPIO 13, etc.
-RPWM_GPIO = 12  # Physical Pin 32
-LPWM_GPIO = 13  # Physical Pin 33
-R_EN_GPIO = 24  # Physical Pin 18
-L_EN_GPIO = 25  # Physical Pin 22
-ENC_A_GPIO = 22 # Physical Pin 15
-ENC_B_GPIO = 23 # Physical Pin 16
+# --- 1. Pin Declarations (BCM GPIO) ---
+RPWM_GPIO = 12  
+LPWM_GPIO = 13  
+R_EN_GPIO = 24  
+L_EN_GPIO = 25  
+ENC_A_GPIO = 22 
+ENC_B_GPIO = 23 
 
 # --- 2. Hardware Setup ---
-rpwm = PWMOutputDevice(RPWM_GPIO, frequency = 1000)
-lpwm = PWMOutputDevice(LPWM_GPIO, frequency = 1000)
+# 1000Hz frequency for REV HD Hex Motor
+rpwm = PWMOutputDevice(RPWM_GPIO, frequency=1000)
+lpwm = PWMOutputDevice(LPWM_GPIO, frequency=1000)
 r_en = DigitalOutputDevice(R_EN_GPIO)
 l_en = DigitalOutputDevice(L_EN_GPIO)
 encoder = RotaryEncoder(ENC_A_GPIO, ENC_B_GPIO, max_steps=0)
 
 # --- 3. PD Constants & State ---
-kp = 0.5  
+kp = 0.8  
 kd = 0.2  
 TICKS_PER_REV = 360 
 MAX_ATTAINABLE_RPM = 100
 
-# Global state variables shared between the input and the motor thread
 target_rpm = 0
 current_dir = "brake"
 prev_error = 0
@@ -33,60 +32,52 @@ prev_time = time()
 current_duty_cycle = 0
 
 def get_velocity():
-    """Calculates current angular velocity (RPM)."""
     global prev_time
     now = time()
     dt = now - prev_time
     
-    if dt <= 0.02: # Prevent division by zero/jitter
+    if dt <= 0.02: 
         return 0, 0
     
     steps = encoder.steps
-    encoder.steps = 0 # Reset for next window
+    encoder.steps = 0 
     
-    # RPM Calculation: (steps / ticks) / (seconds / 60)
     rpm = (steps / TICKS_PER_REV) / (dt / 60.0)
     prev_time = now
     return rpm, dt
 
 def motor_control_loop():
-    """
-    This runs in the BACKGROUND. It keeps the motor spinning at the 
-    target speed even while the user is typing commands.
-    """
     global prev_error, current_duty_cycle, target_rpm, current_dir
     
     k = 0
     while True:
-        # 1. Update Velocity
+        # 1. Update Velocity and time delta
         current_rpm, dt = get_velocity()
-        
-        
         current_rpm = abs(current_rpm)
 
-        # 2. Logic Cases
+        # 2. Case: Brake / Stop
         if current_dir == "brake" or target_rpm == 0:
             rpwm.value = 0
             lpwm.value = 0
             current_duty_cycle = 0
+            # Reset error so it doesn't "jump" when restarted
+            prev_error = 0 
+        
+        # 3. Case: Spin (CW or CCW)
         else:
-            # Enable H-Bridge
             r_en.on()
             l_en.on()
-            k = k+1
-            if(k%40 == 0):
-                print(f"RPS:  + {current_rpm}")
-            # 3. PD Math (Your Logic)
+
+            # PD Math
             error = target_rpm - current_rpm
             derivative = (error - prev_error) / dt if dt > 0 else 0
             
             output = (kp * error) + (kd * derivative)
             
-            # Apply adjustment to duty cycle (scaled for safety)
+            # Adjustment logic
             current_duty_cycle += (output / 1000) 
             current_duty_cycle = max(0, min(1, current_duty_cycle))
 
-            # Set Direction
             if current_dir == "cw":
                 rpwm.value = current_duty_cycle
                 lpwm.value = 0
@@ -95,18 +86,24 @@ def motor_control_loop():
                 lpwm.value = current_duty_cycle
 
             prev_error = error
+
+        # --- Throttled Printing ---
+        # Move this here so it prints even when target is 0/brake
+        k += 1
+        if k % 20 == 0 and current_dir!="brake": # Print every 1 second (20 * 0.05s)
+            status = current_dir.upper() if target_rpm > 0 else "IDLE"
+            print(f"[{status}] Target: {target_rpm} | Actual: {current_rpm:.2f} RPM | PWM: {current_duty_cycle:.2%}")
         
-        sleep(0.05) # Runs at 20Hz (every 50ms)
+        sleep(0.05) 
 
 def main():
     global target_rpm, current_dir
     
-    # Start the motor thread
     motor_thread = threading.Thread(target=motor_control_loop, daemon=True)
     motor_thread.start()
 
-    print("--- Reaction Wheel Control ---")
-    print("Commands: '<speed (rps)> <direction>' (e.g. '200 cw') or 'brake'")
+    print("--- Reaction Wheel System Online ---")
+    print("Commands: '100 cw', '50 ccw', 'brake'")
 
     try:
         while True:
@@ -115,12 +112,11 @@ def main():
             if cmd_input == "brake":
                 target_rpm = 0
                 current_dir = "brake"
-                print(">> Event: Braking motor.")
+                print(">> Command: BRAKE")
             else:
                 try:
                     parts = cmd_input.split()
                     if len(parts) != 2:
-                        print("Error: Use '<speed> <direction>'")
                         continue
                     
                     speed = float(parts[0])
@@ -129,17 +125,17 @@ def main():
                     if 0 <= speed <= MAX_ATTAINABLE_RPM and direction in ["cw", "ccw"]:
                         target_rpm = speed
                         current_dir = direction
-                        print(f">> New Target: {target_rpm} RPM {current_dir.upper()}")
+                        # Reset duty cycle for a fresh start when changing direction
+                        current_duty_cycle = 0 
                     else:
-                        print(f"Safety: Max RPM is {MAX_ATTAINABLE_RPM}. Directions: cw/ccw.")
+                        print(f"Invalid input. Limit: {MAX_ATTAINABLE_RPM} RPM.")
                 
                 except ValueError:
-                    print("Error: Invalid speed number.")
+                    print("Error: Speed must be a number.")
 
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        print("\nExiting...")
     finally:
-        # Emergency Stop
         rpwm.value = 0
         lpwm.value = 0
         r_en.off()
