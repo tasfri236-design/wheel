@@ -150,3 +150,11 @@ STABILIZE_KP=10 STABILIZE_KI=1.5 STABILIZE_KD=0.05 python main.py
   - Verify I2C is enabled and BNO085 wiring/power are correct.
 - UI root shows a JSON message saying UI not built
   - Run `cd web && npm install && npm run build`.
+
+Install node package manager: 
+  # install Node.js + npm (Node 20 LTS)
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+# verify
+node -v
+npm -v
