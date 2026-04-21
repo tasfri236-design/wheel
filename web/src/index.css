@@ -1,0 +1,34 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --bg-elevated: #121922;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #e8eef7;
+  --muted: #8b98a8;
+  --accent: #3b82f6;
+  --accent-dim: rgba(59, 130, 246, 0.15);
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(59, 130, 246, 0.12), transparent),
+    radial-gradient(900px 500px at 100% 0%, rgba(34, 197, 94, 0.08), transparent), var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}

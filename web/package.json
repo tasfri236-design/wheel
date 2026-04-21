@@ -1,0 +1,25 @@
+{
+  "name": "wheel-telemetry",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "api": "cd .. && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "api:mock": "cd .. && MOCK_TELEMETRY=1 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "victory": "^36.9.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.1.4"
+  }
+}
