@@ -48,3 +48,4 @@ Preview window unavailable
 ERROR: *** no cameras available ***
 
 sudo nano /boot/firmware/config.txt
+python follow_ball.py --csi --show
