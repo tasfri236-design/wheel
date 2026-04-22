@@ -46,3 +46,5 @@ Made X/EGL preview window
 Made DRM preview window
 Preview window unavailable
 ERROR: *** no cameras available ***
+
+sudo nano /boot/firmware/config.txt
