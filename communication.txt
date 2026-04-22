@@ -39,3 +39,10 @@ for i in range(6):
     cap.release()
 
 python follow_ball.py --api http://127.0.0.1:8000 --src 1 --dry-run
+
+fri@raspberrypi:~/Desktop/wheel/wheel $ rpicam-hello --timeout 2000
+[0:37:28.949430372] [7840]  INFO Camera camera_manager.cpp:340 libcamera v0.7.0+rpt20260205
+Made X/EGL preview window
+Made DRM preview window
+Preview window unavailable
+ERROR: *** no cameras available ***
