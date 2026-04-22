@@ -264,9 +264,14 @@ python follow_ball.py --show           # preview window + mask
 python follow_ball.py --calibrate      # live HSV trackbars
 python follow_ball.py --dry-run        # log commands, do not POST
 python follow_ball.py --invert         # swap cw/ccw if your rig is mirrored
-python follow_ball.py --csi            # use Picamera2 instead of USB
+python follow_ball.py --csi            # use Picamera2 instead of USB (recommended on Pi)
+python follow_ball.py --csi --rotate 0 # disable the default 180 deg flip
 python follow_ball.py --src 1          # pick a different USB camera index
 ```
+
+> If `camera_stream.py` works on your Pi but `follow_ball.py` says "no frames", it's the same
+> camera being accessed through the wrong backend. Run with `--csi` (Picamera2) — the script will
+> also try this automatically if the USB path yields no frames.
 
 ### What it does
 
@@ -289,6 +294,7 @@ python follow_ball.py --src 1          # pick a different USB camera index
 | `--kp / --ki / --kd` | 0.08 / 0.0 / 0.02 | PID gains on pixel error. Intentionally small so commands react gently; raise Kp if it lags behind the ball. |
 | `--max-rpm` | 60 | Upper bound on `|target_rpm|` in each command. Lower if the platform oscillates. |
 | `--invert` | off | Flip cw/ccw to match your wheel's torque direction. |
+| `--rotate` | 180 | Rotates CSI frames before tracking. Matches `camera_stream.py`'s 180 deg flip for upside-down mounts. |
 
 ### Troubleshooting
 
@@ -297,6 +303,8 @@ python follow_ball.py --src 1          # pick a different USB camera index
 | `cv2.error: (-215:Assertion failed) !_src.empty()` | Camera not opened. Check `/dev/video0` (USB) or add `--csi`. Try `--src 1` for a second camera. |
 | `can't open camera by index` + `OpenCV should be configured with libavdevice` on a Pi | Pi Camera on CSI isn't exposed as `/dev/video0` to OpenCV. Re-run with `--csi` (requires `sudo apt install -y python3-picamera2`). |
 | `camera opened but returned no frames` | Device claimed but produced nothing. Check `ls /dev/video*`, try a different `--src`, or use `--csi` for the CSI cam. |
+| `camera_stream.py` works but `follow_ball.py` does not | Use the same backend: `python follow_ball.py --csi ...`. The CSI path uses Picamera2 with `RGB888` (already BGR-ordered) and a 180 deg rotation by default — override with `--rotate 0/90/270` if your mount differs. |
+| Mask looks blue/purple where the tennis ball should be yellow | R/B channels are swapped. This is fixed for `--csi` (Picamera2 returns BGR-ordered bytes despite the `RGB888` label); for USB, make sure nothing upstream is re-ordering channels. |
 | `ERROR: cannot reach FastAPI at http://127.0.0.1:8000` | Start the Path B server in a second terminal first (see **Run — Path B**). `curl /api/health` should succeed before you launch the tracker. |
 | Ball flickers in and out of the mask | Widen HSV (drop S/V lower bounds), or raise erode/dilate iterations (edit `BallTracker.detect`). Use `--calibrate`. |
 | Motor twitches around centered ball | Raise `--dead-zone` to `0.07`, or lower `--kp`. |

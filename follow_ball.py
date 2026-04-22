@@ -73,21 +73,38 @@ class PID:
 
 
 class CsiStream:
-    """Picamera2 shim exposing VideoStream-like read()/stop()."""
+    """Picamera2 shim exposing VideoStream-like read()/stop().
 
-    def __init__(self, width: int = 640, height: int = 480) -> None:
+    Mirrors the working config in camera_stream.py:
+    - RGB888 format (numpy array is already in BGR byte order - do NOT cvtColor).
+    - Explicit FrameRate in controls.
+    - Optional 180 deg rotation for upside-down-mounted modules.
+    """
+
+    def __init__(self, width: int = 640, height: int = 480, fps: int = 30, rotate: int = 180) -> None:
         from picamera2 import Picamera2
 
         self._picam = Picamera2()
-        cfg = self._picam.create_video_configuration(main={"size": (width, height), "format": "RGB888"})
+        cfg = self._picam.create_video_configuration(
+            main={"size": (width, height), "format": "RGB888"},
+            controls={"FrameRate": fps},
+        )
         self._picam.configure(cfg)
         self._picam.start()
+        self._rotate = rotate % 360
 
     def read(self) -> Optional[np.ndarray]:
         arr = self._picam.capture_array()
         if arr is None:
             return None
-        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        # Picamera2's "RGB888" is stored as BGR in the numpy buffer -> OpenCV-ready.
+        if self._rotate == 90:
+            return cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
+        if self._rotate == 180:
+            return cv2.rotate(arr, cv2.ROTATE_180)
+        if self._rotate == 270:
+            return cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return arr
 
     def stop(self) -> None:
         try:
@@ -203,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--invert", action="store_true", help="Swap cw/ccw mapping")
     p.add_argument("--csi", action="store_true", help="Use Picamera2 instead of USB")
     p.add_argument("--src", type=int, default=0, help="USB camera index")
+    p.add_argument("--rotate", type=int, default=180, choices=[0, 90, 180, 270],
+                   help="Rotate frames (useful if the camera is mounted upside down)")
     p.add_argument("--dry-run", action="store_true", help="Print commands instead of POST")
     p.add_argument("--show", action="store_true", help="Show frame + mask window")
     p.add_argument("--calibrate", action="store_true", help="Open HSV trackbars")
@@ -235,29 +254,62 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    def _open_csi():
+        return CsiStream(rotate=args.rotate)
+
+    def _open_usb():
+        return VideoStream(src=args.src).start()
+
+    def _probe(s, attempts: int = 25) -> Optional[np.ndarray]:
+        for _ in range(attempts):
+            frame = s.read()
+            if frame is not None:
+                return frame
+            time.sleep(0.1)
+        return None
+
     print(f">> opening camera ({'CSI' if args.csi else f'USB src={args.src}'})")
+    stream = None
+    probe = None
     try:
-        if args.csi:
-            stream = CsiStream()
-        else:
-            stream = VideoStream(src=args.src).start()
+        stream = _open_csi() if args.csi else _open_usb()
     except Exception as exc:
         print(f">> ERROR: camera init failed: {exc}")
         if not args.csi:
-            print("   Tip: for the Raspberry Pi CSI camera, re-run with --csi (needs picamera2).")
-        return 3
+            print("   Falling back to Picamera2 (CSI). Pass --csi next time to skip this.")
+            try:
+                stream = _open_csi()
+            except Exception as exc2:
+                print(f">> ERROR: Picamera2 fallback also failed: {exc2}")
+                print("   Install with: sudo apt install -y python3-picamera2")
+                return 3
+        else:
+            return 3
 
     time.sleep(1.5)
+    probe = _probe(stream)
 
-    probe = None
-    for _ in range(25):
-        probe = stream.read()
-        if probe is not None:
-            break
-        time.sleep(0.1)
-    if probe is None:
+    # USB camera claimed /dev/video0 but produced no frames (common on Pi with CSI-only sensors).
+    # Auto-fallback to Picamera2 before giving up.
+    if probe is None and not args.csi:
+        print(">> USB capture returned no frames; retrying via Picamera2 (CSI)...")
         try:
             stream.stop()
+        except Exception:
+            pass
+        try:
+            stream = _open_csi()
+            time.sleep(1.5)
+            probe = _probe(stream)
+            if probe is not None:
+                args.csi = True  # mark so the shutdown path knows
+        except Exception as exc:
+            print(f">> Picamera2 fallback failed: {exc}")
+
+    if probe is None:
+        try:
+            if stream is not None:
+                stream.stop()
         except Exception:
             pass
         src_desc = "CSI (picamera2)" if args.csi else f"/dev/video{args.src}"
@@ -265,9 +317,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             f">> ERROR: camera opened but returned no frames from {src_desc}.\n"
             f"   - USB: check `ls /dev/video*`; try --src 1 if another index.\n"
             f"   - Pi Camera over CSI: re-run with --csi; `sudo apt install -y python3-picamera2`.\n"
-            f"   - Headless OpenCV lacks libavdevice; V4L2 must see the device directly."
+            f"   - If camera_stream.py works, run:  python follow_ball.py --csi --rotate 180 ..."
         )
         return 4
+    print(f">> camera ready: {probe.shape[1]}x{probe.shape[0]} (rotate={args.rotate if args.csi else 0})")
 
     tracker = BallTracker(args.hsv_lower, args.hsv_upper)
     pid = PID(kp=args.kp, ki=args.ki, kd=args.kd)
