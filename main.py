@@ -7,7 +7,7 @@ from time import sleep, time
 from gpiozero import PWMOutputDevice, DigitalOutputDevice, RotaryEncoder
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE
-from wheel.camera_stream import start_camera_stream 
+from camera_stream import start_camera_stream 
 # Camera stream:
 # http://<pi-ip>:8000/
 # http://<pi-ip>:8000/stream.mjpg

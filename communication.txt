@@ -7,3 +7,9 @@
 [warn] /api/command failed: HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /api/command (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7fff96ff5400>: Failed to establish a new connection: [Errno 111] Connection refused'))
 terminate called without an active exception
 Aborted
+
+python follow_ball.py --api http://127.0.0.1:8000A
+>> ERROR: cannot reach FastAPI at http://127.0.0.1:8000A: Failed to parse: http://127.0.0.1:8000A/api/health
+   Start it first (on the same host):
+   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+   Or re-run with --dry-run to skip the API.
