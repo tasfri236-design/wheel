@@ -13,3 +13,8 @@ python follow_ball.py --api http://127.0.0.1:8000A
    Start it first (on the same host):
    python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
    Or re-run with --dry-run to skip the API.
+
+   >> ERROR: camera opened but returned no frames from /dev/video0.
+   - USB: check `ls /dev/video*`; try --src 1 if another index.
+   - Pi Camera over CSI: re-run with --csi; `sudo apt install -y python3-picamera2`.
+   - Headless OpenCV lacks libavdevice; V4L2 must see the device directly.
