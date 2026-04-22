@@ -286,7 +286,8 @@ python follow_ball.py --src 1          # pick a different USB camera index
 | `--width` | 400 | Frame width after resize. Lower = faster on Pi. |
 | `--dead-zone` | 0.05 | Fraction of width treated as "centered" (brake). Raise to 0.07 if motor twitches. |
 | `--stop-radius` | 80 | Braking radius. Calibrate by holding the ball where you want it to stop, note the printed radius, set this to that value. Hysteresis re-enables tracking once radius falls below `0.85 × stop-radius`. |
-| `--kp / --ki / --kd` | 0.25 / 0.0 / 0.05 | PID gains on pixel error. Output clamped to 0-100 RPM. |
+| `--kp / --ki / --kd` | 0.08 / 0.0 / 0.02 | PID gains on pixel error. Intentionally small so commands react gently; raise Kp if it lags behind the ball. |
+| `--max-rpm` | 60 | Upper bound on `|target_rpm|` in each command. Lower if the platform oscillates. |
 | `--invert` | off | Flip cw/ccw to match your wheel's torque direction. |
 
 ### Troubleshooting
@@ -294,6 +295,9 @@ python follow_ball.py --src 1          # pick a different USB camera index
 | Problem | Fix |
 |---------|-----|
 | `cv2.error: (-215:Assertion failed) !_src.empty()` | Camera not opened. Check `/dev/video0` (USB) or add `--csi`. Try `--src 1` for a second camera. |
+| `can't open camera by index` + `OpenCV should be configured with libavdevice` on a Pi | Pi Camera on CSI isn't exposed as `/dev/video0` to OpenCV. Re-run with `--csi` (requires `sudo apt install -y python3-picamera2`). |
+| `camera opened but returned no frames` | Device claimed but produced nothing. Check `ls /dev/video*`, try a different `--src`, or use `--csi` for the CSI cam. |
+| `ERROR: cannot reach FastAPI at http://127.0.0.1:8000` | Start the Path B server in a second terminal first (see **Run — Path B**). `curl /api/health` should succeed before you launch the tracker. |
 | Ball flickers in and out of the mask | Widen HSV (drop S/V lower bounds), or raise erode/dilate iterations (edit `BallTracker.detect`). Use `--calibrate`. |
 | Motor twitches around centered ball | Raise `--dead-zone` to `0.07`, or lower `--kp`. |
 | FPS below 10 on the Pi | Drop `--width` to 320, omit `--show`, install OpenCV via `apt`, or keep `cv2.setNumThreads(2)` (already on). |

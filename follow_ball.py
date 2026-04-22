@@ -31,7 +31,7 @@ YELLOW_LOWER_DEFAULT = (25, 80, 80)
 YELLOW_UPPER_DEFAULT = (45, 255, 255)
 
 MIN_RADIUS_PX = 8
-MAX_ATTAINABLE_RPM = 100
+MAX_ATTAINABLE_RPM = 60
 COMMAND_MIN_INTERVAL = 1.0 / 20.0
 COMMAND_RPM_EPSILON = 2.0
 
@@ -195,9 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dead-zone", type=float, default=0.05, help="Fraction of width considered centered")
     p.add_argument("--stop-radius", type=float, default=80.0, help="Radius (px) at which we brake")
     p.add_argument("--min-radius", type=float, default=float(MIN_RADIUS_PX), help="Reject smaller blobs")
-    p.add_argument("--kp", type=float, default=0.25)
+    p.add_argument("--kp", type=float, default=0.08)
     p.add_argument("--ki", type=float, default=0.0)
-    p.add_argument("--kd", type=float, default=0.05)
+    p.add_argument("--kd", type=float, default=0.02)
+    p.add_argument("--max-rpm", type=float, default=float(MAX_ATTAINABLE_RPM),
+                   help="Upper bound on |target_rpm| sent to /api/command")
     p.add_argument("--invert", action="store_true", help="Swap cw/ccw mapping")
     p.add_argument("--csi", action="store_true", help="Use Picamera2 instead of USB")
     p.add_argument("--src", type=int, default=0, help="USB camera index")
@@ -219,12 +221,53 @@ def main(argv: Optional[list[str]] = None) -> int:
     except cv2.error:
         pass
 
+    if not args.dry_run:
+        try:
+            health = requests.get(f"{args.api.rstrip('/')}/api/health", timeout=1.0)
+            health.raise_for_status()
+            print(f">> API reachable at {args.api} -> {health.json()}")
+        except requests.RequestException as exc:
+            print(
+                f">> ERROR: cannot reach FastAPI at {args.api}: {exc}\n"
+                f"   Start it first (on the same host):\n"
+                f"   python -m uvicorn app.main:app --host 0.0.0.0 --port 8000\n"
+                f"   Or re-run with --dry-run to skip the API."
+            )
+            return 2
+
     print(f">> opening camera ({'CSI' if args.csi else f'USB src={args.src}'})")
-    if args.csi:
-        stream = CsiStream()
-    else:
-        stream = VideoStream(src=args.src).start()
+    try:
+        if args.csi:
+            stream = CsiStream()
+        else:
+            stream = VideoStream(src=args.src).start()
+    except Exception as exc:
+        print(f">> ERROR: camera init failed: {exc}")
+        if not args.csi:
+            print("   Tip: for the Raspberry Pi CSI camera, re-run with --csi (needs picamera2).")
+        return 3
+
     time.sleep(1.5)
+
+    probe = None
+    for _ in range(25):
+        probe = stream.read()
+        if probe is not None:
+            break
+        time.sleep(0.1)
+    if probe is None:
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        src_desc = "CSI (picamera2)" if args.csi else f"/dev/video{args.src}"
+        print(
+            f">> ERROR: camera opened but returned no frames from {src_desc}.\n"
+            f"   - USB: check `ls /dev/video*`; try --src 1 if another index.\n"
+            f"   - Pi Camera over CSI: re-run with --csi; `sudo apt install -y python3-picamera2`.\n"
+            f"   - Headless OpenCV lacks libavdevice; V4L2 must see the device directly."
+        )
+        return 4
 
     tracker = BallTracker(args.hsv_lower, args.hsv_upper)
     pid = PID(kp=args.kp, ki=args.ki, kd=args.kd)
@@ -294,7 +337,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if args.invert:
                         positive_right = not positive_right
                     direction = "cw" if positive_right else "ccw"
-                    target_rpm = min(float(MAX_ATTAINABLE_RPM), abs(u))
+                    target_rpm = min(float(args.max_rpm), abs(u))
                     client.spin(target_rpm, direction, now)
 
                 if now - last_print > 0.5:
