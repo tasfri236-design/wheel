@@ -18,3 +18,23 @@ python follow_ball.py --api http://127.0.0.1:8000A
    - USB: check `ls /dev/video*`; try --src 1 if another index.
    - Pi Camera over CSI: re-run with --csi; `sudo apt install -y python3-picamera2`.
    - Headless OpenCV lacks libavdevice; V4L2 must see the device directly.
+
+sudo apt update
+sudo apt install -y python3-picamera2 python3-libcamera
+
+deactivate
+python3 -m venv --system-site-packages ~/FRI-venv
+source ~/FRI-venv/bin/activate
+pip install -r requirements.txt
+
+python follow_ball.py --api http://127.0.0.1:8000 --csi --dry-run
+
+python - <<'PY'
+import cv2
+for i in range(6):
+    cap = cv2.VideoCapture(i)
+    ok, frame = cap.read()
+    print(i, "open" if cap.isOpened() else "no", "frame ok:", ok)
+    cap.release()
+
+python follow_ball.py --api http://127.0.0.1:8000 --src 1 --dry-run
