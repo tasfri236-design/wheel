@@ -49,3 +49,9 @@ ERROR: *** no cameras available ***
 
 sudo nano /boot/firmware/config.txt
 python follow_ball.py --csi --show
+
+(FRI-venv) fri@raspberrypi:~/Desktop/wheel/wheel $ python follow_ball.py --csi --show
+>> API reachable at http://127.0.0.1:8000 -> {'ok': True, 'imu_connected': True, 'mock': False}
+>> opening camera (CSI)
+[0:06:24.743538886] [2799]  INFO Camera camera_manager.cpp:340 libcamera v0.7.0+rpt20260205
+>> ERROR: camera init failed: list index out of range
