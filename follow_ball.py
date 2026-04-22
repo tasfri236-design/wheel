@@ -84,13 +84,34 @@ class CsiStream:
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30, rotate: int = 180) -> None:
         from picamera2 import Picamera2
 
-        self._picam = Picamera2()
-        cfg = self._picam.create_video_configuration(
-            main={"size": (width, height), "format": "RGB888"},
-            controls={"FrameRate": fps},
-        )
-        self._picam.configure(cfg)
-        self._picam.start()
+        # Avoid Picamera2's cryptic "list index out of range" when no camera is enumerated.
+        try:
+            camera_info = Picamera2.global_camera_info()
+        except Exception as exc:
+            raise RuntimeError(f"failed to enumerate CSI cameras: {exc}") from exc
+        if not camera_info:
+            raise RuntimeError(
+                "no CSI cameras found (libcamera reports none). "
+                "Check camera cable/orientation and enable camera support in raspi-config."
+            )
+
+        try:
+            self._picam = Picamera2()
+            cfg = self._picam.create_video_configuration(
+                main={"size": (width, height), "format": "RGB888"},
+                controls={"FrameRate": fps},
+            )
+            self._picam.configure(cfg)
+            self._picam.start()
+        except Exception as exc:
+            msg = str(exc)
+            if "list index out of range" in msg:
+                raise RuntimeError(
+                    "CSI camera initialization failed: no usable camera device was selected. "
+                    "Run `rpicam-hello --list-cameras` to confirm detection."
+                ) from exc
+            raise RuntimeError(f"CSI camera initialization failed: {msg}") from exc
+
         self._rotate = rotate % 360
 
     def read(self) -> Optional[np.ndarray]:

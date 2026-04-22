@@ -55,3 +55,12 @@ python follow_ball.py --csi --show
 >> opening camera (CSI)
 [0:06:24.743538886] [2799]  INFO Camera camera_manager.cpp:340 libcamera v0.7.0+rpt20260205
 >> ERROR: camera init failed: list index out of range
+
+
+Traceback (most recent call last):
+  File "/home/fri/Desktop/wheel/wheel/camera_stream.py", line 140, in _capture_loop
+    _picam2 = Picamera2()
+  File "/usr/lib/python3/dist-packages/picamera2/picamera2.py", line 341, in __init__
+    camera_num = self.global_camera_info()[camera_num]['Num']
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+IndexError: list index out of range
