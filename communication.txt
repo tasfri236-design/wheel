@@ -21,6 +21,7 @@ python follow_ball.py --api http://127.0.0.1:8000A
 
 sudo apt update
 sudo apt install -y python3-picamera2 python3-libcamera
+libcamera-hello --timeout 2000
 
 deactivate
 python3 -m venv --system-site-packages ~/FRI-venv
