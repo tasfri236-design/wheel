@@ -235,45 +235,66 @@ Note: `web/` on its own does nothing — it is a UI shell that streams telemetry
 
 ## Camera ball-follow (PID)
 
-Standalone OpenCV script [follow_ball.py](follow_ball.py) that tracks an **optic-yellow tennis ball**, maps pixel error to a PID command, and drives the reaction wheel through the **Path B** FastAPI `POST /api/command` endpoint. No changes to `app/`; the vision loop runs as its own process.
+The ball-follow loop is **integrated into the FastAPI server** and the **web dashboard**. One server, one button — open the dashboard and click _Start follow_.
 
-Prereqs:
+Behind the scenes:
 
-- Camera plugged in: USB webcam on `/dev/video0` (default) **or** the Pi Camera on CSI with `--csi`.
-- Path B server already running (real hardware or `MOCK_TELEMETRY=1`) and reachable at `--api`.
-- Extra Python deps installed (already in [requirements.txt](requirements.txt)):
+- The camera is the same Picamera2 pipeline that powers [camera_viewer.py](camera_viewer.py) / [camera_stream.py](camera_stream.py) (`RGB888` at 640×480 @ 30 fps, rotated 180°).
+- The follow PID lives in [app/follow_loop.py](app/follow_loop.py) and writes commands directly into the existing `MotorState`, so the motor control thread retains GPIO ownership and the loop never self-calls HTTP.
+- The MJPEG preview is served by FastAPI on the same `:8000` port at `/api/camera/stream.mjpg`, so there is no port conflict and no second server.
 
-  ```bash
-  pip install -r requirements.txt
-  # On Pi OS you can replace the opencv wheel with:
-  sudo apt install -y python3-opencv
-  ```
-
-### The command
-
-From repo root, with venv activated and the API up:
+### One-time install on the Pi
 
 ```bash
-python follow_ball.py --api http://127.0.0.1:8000
+# camera stack (CSI Pi Camera)
+sudo apt install -y python3-picamera2 rpicam-apps
+
+# Python deps for the FastAPI app + tracker
+pip install -r requirements.txt
 ```
 
-Useful variants:
+Make sure `rpicam-hello --list-cameras` shows your sensor before continuing.
+
+### Run it
 
 ```bash
-python follow_ball.py --show           # preview window + mask
-python follow_ball.py --calibrate      # live HSV trackbars
-python follow_ball.py --dry-run        # log commands, do not POST
-python follow_ball.py --invert         # swap cw/ccw if your rig is mirrored
-python follow_ball.py --csi            # use Picamera2 instead of USB (recommended on Pi)
-python follow_ball.py --csi --rotate 0 # disable the default 180 deg flip
-python follow_ball.py --src 1          # pick a different USB camera index
+# Real hardware:
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Or, on a dev Mac without GPIO/IMU/camera (UI works; camera section will be greyed out):
+MOCK_TELEMETRY=1 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-> If `camera_stream.py` works on your Pi but `follow_ball.py` says "no frames", it's the same
-> camera being accessed through the wrong backend. Run with `--csi` (Picamera2) — the script will
-> also try this automatically if the USB path yields no frames.
+Open `http://<pi-ip>:8000` (production build) or `http://127.0.0.1:5173` (Vite dev server) and use the **Camera follow** card:
 
-### What it does
+1. Click _Show live preview_ (or _Start follow_ — the preview auto-attaches).
+2. Tweak the gains (defaults: `Kp 0.08 / Ki 0 / Kd 0.02`, max **60** RPM, **5 %** dead zone, stop radius **80** px).
+3. Click _Start follow_. The motor command pills below the preview update in real time.
+4. Click _Stop follow_ to brake the wheel and re-enable manual RPM/brake controls.
+
+While follow is running, the manual RPM controls below are disabled so you can't fight the loop.
+
+### REST surface (for scripting / debugging)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/api/health` | Adds `camera_available`, `camera_running`. |
+| `GET`  | `/api/follow/status` | Live status + active config. |
+| `POST` | `/api/follow/start` | Body: any subset of `kp/ki/kd/max_rpm/dead_zone/stop_radius/invert/hsv_lower/hsv_upper/track_width`. Auto-starts capture. |
+| `POST` | `/api/follow/stop` | Stops the loop and brakes the motor. |
+| `POST` | `/api/follow/config` | Hot-update gains/HSV without restarting the loop. |
+| `GET`  | `/api/camera/stream.mjpg` | `multipart/x-mixed-replace` MJPEG. |
+| `GET`  | `/api/camera/snapshot.jpg` | One-shot JPEG (handy when MJPEG is blocked). |
+
+The telemetry WebSocket payload now includes a `follow` sub-object (`running`, `detected`, `error_px`, `target_rpm`, `direction`, `fps`, plus the active `config`).
+
+### Headless / standalone fallbacks
+
+If you want to run the tracker without the dashboard (e.g. over plain SSH):
+
+- [follow_ball.py](follow_ball.py) — pure CLI, posts to `/api/command`. Use `--csi --rotate 180` on the Pi.
+- [follow_ball_viewer.py](follow_ball_viewer.py) — uses `camera_stream.py` for capture, browser preview on a configurable port.
+
+### What the integrated loop does
 
 - Resizes each frame to `--width 400` for speed.
 - `GaussianBlur (11,11)` → HSV `inRange` with optic-yellow bounds → `erode x2` → `dilate x2`.
@@ -282,35 +303,35 @@ python follow_ball.py --src 1          # pick a different USB camera index
 - Otherwise runs a PID and POSTs `{"target_rpm": …, "direction": "cw"|"ccw"}` with `target_rpm` clamped to `MAX_ATTAINABLE_RPM` (100). Commands are rate-limited to 20 Hz.
 - Loses ball → brake + reset PID; no ball → no motion.
 
-### Tuning crib sheet
+### Tuning crib sheet (UI fields and CLI flags share the same names)
 
-| Flag | Default | Meaning |
+| Field / Flag | Default | Meaning |
 |------|---------|---------|
-| `--hsv-lower "H,S,V"` | `25,80,80` | Optic-yellow lower bound. Indoor warm light: drop H to ~22. |
-| `--hsv-upper "H,S,V"` | `45,255,255` | Upper bound. Outdoor sun: drop S/V floors. |
-| `--width` | 400 | Frame width after resize. Lower = faster on Pi. |
-| `--dead-zone` | 0.05 | Fraction of width treated as "centered" (brake). Raise to 0.07 if motor twitches. |
-| `--stop-radius` | 80 | Braking radius. Calibrate by holding the ball where you want it to stop, note the printed radius, set this to that value. Hysteresis re-enables tracking once radius falls below `0.85 × stop-radius`. |
-| `--kp / --ki / --kd` | 0.08 / 0.0 / 0.02 | PID gains on pixel error. Intentionally small so commands react gently; raise Kp if it lags behind the ball. |
-| `--max-rpm` | 60 | Upper bound on `|target_rpm|` in each command. Lower if the platform oscillates. |
-| `--invert` | off | Flip cw/ccw to match your wheel's torque direction. |
-| `--rotate` | 180 | Rotates CSI frames before tracking. Matches `camera_stream.py`'s 180 deg flip for upside-down mounts. |
+| HSV lower / `--hsv-lower "H,S,V"` | `25,80,80` | Optic-yellow lower bound. Indoor warm light: drop H to ~22. |
+| HSV upper / `--hsv-upper "H,S,V"` | `45,255,255` | Upper bound. Outdoor sun: drop S/V floors. |
+| `--width` (CLI) | 400 | Frame width after resize. Lower = faster on Pi. |
+| Dead zone / `--dead-zone` | 0.05 | Fraction of width treated as "centered" (brake). Raise to 0.07 if motor twitches. |
+| Stop radius / `--stop-radius` | 80 | Braking radius. Calibrate by holding the ball where you want it to stop, note the printed radius, set this to that value. Hysteresis re-enables tracking once radius falls below `0.85 × stop-radius`. |
+| Kp / Ki / Kd | 0.08 / 0.0 / 0.02 | PID gains on pixel error. Intentionally small so commands react gently; raise Kp if it lags behind the ball. |
+| Max RPM / `--max-rpm` | 60 | Upper bound on `|target_rpm|` per command (server clamps to 100 hardware max). |
+| Invert / `--invert` | off | Flip cw/ccw to match your wheel's torque direction. |
+| `--rotate` (CLI only) | 180 | Rotates CSI frames before tracking. The integrated loop always rotates 180° to match `camera_stream.py`. |
 
 ### Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `cv2.error: (-215:Assertion failed) !_src.empty()` | Camera not opened. Check `/dev/video0` (USB) or add `--csi`. Try `--src 1` for a second camera. |
-| `can't open camera by index` + `OpenCV should be configured with libavdevice` on a Pi | Pi Camera on CSI isn't exposed as `/dev/video0` to OpenCV. Re-run with `--csi` (requires `sudo apt install -y python3-picamera2`). |
-| `camera opened but returned no frames` | Device claimed but produced nothing. Check `ls /dev/video*`, try a different `--src`, or use `--csi` for the CSI cam. |
-| `camera_stream.py` works but `follow_ball.py` does not | Use the same backend: `python follow_ball.py --csi ...`. The CSI path uses Picamera2 with `RGB888` (already BGR-ordered) and a 180 deg rotation by default — override with `--rotate 0/90/270` if your mount differs. |
-| Mask looks blue/purple where the tennis ball should be yellow | R/B channels are swapped. This is fixed for `--csi` (Picamera2 returns BGR-ordered bytes despite the `RGB888` label); for USB, make sure nothing upstream is re-ordering channels. |
-| `ERROR: cannot reach FastAPI at http://127.0.0.1:8000` | Start the Path B server in a second terminal first (see **Run — Path B**). `curl /api/health` should succeed before you launch the tracker. |
-| Ball flickers in and out of the mask | Widen HSV (drop S/V lower bounds), or raise erode/dilate iterations (edit `BallTracker.detect`). Use `--calibrate`. |
-| Motor twitches around centered ball | Raise `--dead-zone` to `0.07`, or lower `--kp`. |
-| FPS below 10 on the Pi | Drop `--width` to 320, omit `--show`, install OpenCV via `apt`, or keep `cv2.setNumThreads(2)` (already on). |
-| Commands arrive but wheel does not yaw toward ball | Add `--invert` (wheel torque sign is rig-dependent). |
-| `Connection refused` / timeouts from `/api/command` | Start Path B server first (see **Run — Path B**), or pass `--api http://<pi-ip>:8000`. |
+| Dashboard shows _"Camera unavailable"_ | `picamera2` isn't installed on this host. On a Pi: `sudo apt install -y python3-picamera2 rpicam-apps`. On a dev Mac it's expected — the rest of the dashboard still works. |
+| _Start follow_ returns 503 with `Failed to start Picamera2 capture` | Another process is holding the camera. `ps -ef \| grep -E 'camera_stream\|camera_viewer\|main\.py' \| grep -v grep`, then `pkill` it and retry. |
+| MJPEG preview never appears in the dashboard | Click _Show live preview_; if it still fails, try `curl -I http://<pi-ip>:8000/api/camera/snapshot.jpg`. A 503 there points to the camera issue above. |
+| Mask looks blue/purple where the tennis ball should be yellow | Picamera2's `RGB888` is BGR-ordered. The integrated loop and `follow_ball.py --csi` both handle this; if you wrote a custom OpenCV path, do **not** call `cvtColor(RGB2BGR)` on Picamera2 frames. |
+| Ball flickers in and out of the mask | Widen HSV (drop S/V lower bounds) in the dashboard's HSV inputs and click _Apply tuning_. |
+| Motor twitches around a centered ball | Raise dead zone to `0.07`, or lower Kp. |
+| Commands arrive but wheel does not yaw toward ball | Toggle _Invert spin direction_. |
+| FPS below 10 on the Pi | Close the Vite dev server / extra browser tabs, lower `track_width` (CLI: `--width 320`), or install OpenCV via apt. |
+| Headless CLI: `cv2.error: (-215:Assertion failed) !_src.empty()` | Camera not opened. Check `/dev/video0` (USB) or add `--csi`. |
+| Headless CLI: `can't open camera by index` on Pi | Pi Camera on CSI isn't exposed as `/dev/video0`. Re-run with `--csi`. |
+| Headless CLI: `camera_stream.py` works but `follow_ball.py` does not | Run `python follow_ball.py --csi --rotate 180` (or use the dashboard). |
 
 ## Raspberry Pi prerequisites (hardware mode, both paths)
 
