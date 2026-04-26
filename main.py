@@ -7,7 +7,10 @@ from time import sleep, time
 from gpiozero import PWMOutputDevice, DigitalOutputDevice, RotaryEncoder
 from adafruit_bno08x.i2c import BNO08X_I2C
 from adafruit_bno08x import BNO_REPORT_GYROSCOPE
-from camera_stream import start_camera_stream 
+from camera_stream import start_camera_stream
+import cv2
+import imutils
+import numpy as np 
 # Camera stream:
 # http://<pi-ip>:8000/
 # http://<pi-ip>:8000/stream.mjpg
@@ -39,8 +42,8 @@ except Exception as e:
     imu_connected = False
 
 # --- 4. Constants & State ---
-kp = 0.1
-kd = 0.8  
+kp = 0.4
+kd = 0.4  
 
 TICKS_PER_REV = 360    
 TILT_ANGLE = math.radians(45)
@@ -50,6 +53,18 @@ MAX_AUTO_RPM = 10
 STABILITY_GAIN = 2
 CAMERA_STREAM_PORT = 8000
 
+# --- Ball Tracking Constants ---
+BALL_TRACKING_FPS = 30
+BALL_LOWER_HSV = np.array([25, 50, 50], dtype=np.uint8)    # Yellow lower bound
+BALL_UPPER_HSV = np.array([85, 255, 255], dtype=np.uint8)  # Yellow upper bound
+BALL_MIN_RADIUS_PX = 8
+BALL_STOP_RADIUS_PX = 80.0
+BALL_DEAD_ZONE_FRACTION = 0.05
+BALL_KP = 0.08
+BALL_KI = 0.0
+BALL_KD = 0.02
+BALL_MAX_RPM = 10
+
 # Global State
 target_rpm = 0
 current_dir = "brake"
@@ -57,6 +72,8 @@ system_mode = "manual"
 prev_error = 0
 prev_time = time()
 current_duty_cycle = 0
+ball_tracking_running = False
+ball_frame_buffer = None
 
 # --- 5. Support Functions ---
 
@@ -149,10 +166,138 @@ def maintain_loop():
                 pass 
         sleep(0.02)
 
+def detect_tennis_ball(frame_bgr):
+    
+    """Detect yellow tennis ball and return (cx, cy, radius) or None."""
+    blurred = cv2.GaussianBlur(frame_bgr, (11, 11), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, BALL_LOWER_HSV, BALL_UPPER_HSV)
+    mask = cv2.erode(mask, None, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=2)
+    
+    cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+    
+    cv2.imshow("mask", mask)
+    cv2.waitKey(1)
+
+    if not cnts:
+        return None
+    
+    c = max(cnts, key=cv2.contourArea)
+    ((x, y), radius) = cv2.minEnclosingCircle(c)
+    
+    if radius < BALL_MIN_RADIUS_PX:
+        return None
+    
+    return (float(x), float(y), float(radius))
+
+def ball_tracking_loop():
+    """Tennis ball tracking loop that adjusts wheel based on ball position."""
+    global target_rpm, current_dir, system_mode, ball_tracking_running
+    
+    try:
+        # Open camera feed
+        from imutils.video import VideoStream
+        print(">> Opening camera for ball tracking...")
+        stream = VideoStream(src=0).start()
+        sleep(1.5)
+        
+        # PID controller for tracking
+        pid_integral = 0.0
+        pid_prev_error = None
+        
+        stopped_by_radius = False
+        stop_hyst_px = BALL_STOP_RADIUS_PX * 0.85
+        last_print = time()
+        last_command_time = time()
+        
+        print(">> Ball tracking started. Press Ctrl+C to stop.")
+        
+        while ball_tracking_running:
+            loop_start = time()
+            raw = stream.read()
+            
+            if raw is None:
+                sleep(0.01)
+                continue
+            
+            frame = imutils.resize(raw, width=400)
+            h, w = frame.shape[:2]
+            center_x = w / 2.0
+            dead_zone_px = BALL_DEAD_ZONE_FRACTION * w
+            
+            result = detect_tennis_ball(frame)
+            now = time()
+            
+            if result is None:
+                # No ball detected - brake
+                target_rpm = 0
+                current_dir = "brake"
+                pid_integral = 0.0
+                pid_prev_error = None
+            else:
+                cx, cy, radius = result
+                error = cx - center_x
+                
+                # Check if ball is close enough to brake
+                if radius >= BALL_STOP_RADIUS_PX:
+                    stopped_by_radius = True
+                elif stopped_by_radius and radius < stop_hyst_px:
+                    stopped_by_radius = False
+                
+                # If ball is centered or too close, brake
+                if stopped_by_radius or abs(error) <= dead_zone_px:
+                    target_rpm = 0
+                    current_dir = "brake"
+                    pid_integral = 0.0
+                    pid_prev_error = None
+                else:
+                    # PID control
+                    dt = (now - last_command_time) if last_command_time else 0.01
+                    pid_integral += error * dt
+                    pid_integral = max(-50, min(50, pid_integral))  # Clamp integral
+                    
+                    derivative = 0.0 if pid_prev_error is None else (error - pid_prev_error) / dt
+                    u = (BALL_KP * error) + (BALL_KI * pid_integral) + (BALL_KD * derivative)
+                    
+                    pid_prev_error = error
+                    
+                    # Determine direction and RPM
+                    positive_right = (u > 0)
+                    current_dir = "cw" if positive_right else "ccw"
+                    target_rpm = min(BALL_MAX_RPM, abs(u))
+                
+                last_command_time = now
+                
+                if now - last_print > 0.5:
+                    last_print = now
+                    print(f"[BALL] cx={cx:6.1f} err={error:+7.1f} r={radius:5.1f} "
+                          f"dir={current_dir.upper()} rpm={target_rpm:.1f}")
+            
+            # Frame rate control
+            elapsed = time() - loop_start
+            frame_period = 1.0 / BALL_TRACKING_FPS
+            if elapsed < frame_period:
+                sleep(frame_period - elapsed)
+    
+    except Exception as e:
+        print(f"❌ Ball tracking error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        ball_tracking_running = False
+        target_rpm = 0
+        current_dir = "brake"
+        try:
+            stream.stop()
+        except:
+            pass
+
 # --- 6. Main Entry Point ---
 
 def main():
-    global target_rpm, current_dir, system_mode, current_duty_cycle
+    global target_rpm, current_dir, system_mode, current_duty_cycle, ball_tracking_running
 
     # Header
     print("\n" + "="*45)
@@ -163,9 +308,10 @@ def main():
     print("\nSelect Operating Mode:")
     print(" [1] Auto-Stabilize (IMU Active Correction)")
     print(" [2] Manual (Fixed RPM Commands)")
+    print(" [3] Tennis Ball Tracking (Vision-based Control)")
     
     while True:
-        choice = input("\nEnter choice (1 or 2) > ").strip()
+        choice = input("\nEnter choice (1, 2, or 3) > ").strip()
         if choice == "1":
             system_mode = "auto"
             print(">> INITIALIZING IN AUTO MODE...")
@@ -174,8 +320,12 @@ def main():
             system_mode = "manual"
             print(">> INITIALIZING IN MANUAL MODE...")
             break
+        elif choice == "3":
+            system_mode = "ball_tracking"
+            print(">> INITIALIZING IN BALL TRACKING MODE...")
+            break
         else:
-            print("Invalid selection. Please enter 1 or 2.")
+            print("Invalid selection. Please enter 1, 2, or 3.")
 
 
     # 2. Start Background Threads
@@ -185,10 +335,20 @@ def main():
     stabilizer_thread = threading.Thread(target=maintain_loop, daemon=True)
     stabilizer_thread.start()
 
+    # Start ball tracking if selected
+    ball_tracker_thread = None
+    if system_mode == "ball_tracking":
+        ball_tracking_running = True
+        ball_tracker_thread = threading.Thread(target=ball_tracking_loop, daemon=True)
+        ball_tracker_thread.start()
+
     picam2 = start_camera_stream(port=CAMERA_STREAM_PORT)
 
     print("\n--- System Online ---")
-    print("Commands: 'auto', 'manual', 'brake', or '[speed] [dir]' (e.g., '50 cw')")
+    if system_mode == "ball_tracking":
+        print("Ball Tracking Mode Active. Commands: 'stop', 'auto', 'manual', or 'exit'")
+    else:
+        print("Commands: 'auto', 'manual', 'brake', or '[speed] [dir]' (e.g., '50 cw')")
 
     try:
         while True:
@@ -197,48 +357,82 @@ def main():
             if not cmd_input:
                 continue
 
-            if cmd_input == "brake":
-                system_mode = "manual"
-                target_rpm = 0
-                current_dir = "brake"
-                current_duty_cycle = 0
-                print(">> Action: BRAKING")
+            # Ball tracking mode specific commands
+            if system_mode == "ball_tracking":
+                if cmd_input == "stop":
+                    ball_tracking_running = False
+                    target_rpm = 0
+                    current_dir = "brake"
+                    print(">> Action: STOPPED BALL TRACKING")
+                elif cmd_input == "auto":
+                    ball_tracking_running = False
+                    system_mode = "auto"
+                    target_rpm = 0
+                    current_dir = "brake"
+                    print(">> Action: SWITCHED TO AUTO MODE")
+                elif cmd_input == "manual":
+                    ball_tracking_running = False
+                    system_mode = "manual"
+                    target_rpm = 0
+                    current_dir = "brake"
+                    print(">> Action: SWITCHED TO MANUAL MODE")
+                elif cmd_input == "exit":
+                    break
+                else:
+                    print("Ball Tracking Mode Commands: 'stop', 'auto', 'manual', or 'exit'")
             
-            elif cmd_input == "auto":
-                system_mode = "auto"
-                current_duty_cycle = 0 # Reset PID for a clean transition
-                print(f">> Action: SWITCHED TO AUTO (Gain: {STABILITY_GAIN})")
-            
-            elif cmd_input == "manual":
-                system_mode = "manual"
-                target_rpm = 0
-                current_dir = "brake"
-                print(">> Action: SWITCHED TO MANUAL (Idle)")
-                
+            # Standard mode commands
             else:
-                try:
-                    parts = cmd_input.split()
-                    if len(parts) == 2:
-                        speed = float(parts[0])
-                        direction = parts[1]
+                if cmd_input == "brake":
+                    system_mode = "manual"
+                    target_rpm = 0
+                    current_dir = "brake"
+                    current_duty_cycle = 0
+                    print(">> Action: BRAKING")
+                
+                elif cmd_input == "auto":
+                    system_mode = "auto"
+                    current_duty_cycle = 0 # Reset PID for a clean transition
+                    print(f">> Action: SWITCHED TO AUTO (Gain: {STABILITY_GAIN})")
+                
+                elif cmd_input == "manual":
+                    system_mode = "manual"
+                    target_rpm = 0
+                    current_dir = "brake"
+                    print(">> Action: SWITCHED TO MANUAL (Idle)")
+                
+                elif cmd_input == "ball":
+                    system_mode = "ball_tracking"
+                    ball_tracking_running = True
+                    ball_tracker_thread = threading.Thread(target=ball_tracking_loop, daemon=True)
+                    ball_tracker_thread.start()
+                    print(">> Action: SWITCHED TO BALL TRACKING")
+                    
+                else:
+                    try:
+                        parts = cmd_input.split()
+                        if len(parts) == 2:
+                            speed = float(parts[0])
+                            direction = parts[1]
 
-                        if 0 <= speed <= MAX_ATTAINABLE_RPM and direction in ["cw", "ccw"]:
-                            system_mode = "manual" 
-                            target_rpm = speed
-                            current_dir = direction
-                            current_duty_cycle = 0 
-                            print(f">> Action: MANUAL DRIVE {speed} RPM {direction.upper()}")
+                            if 0 <= speed <= MAX_ATTAINABLE_RPM and direction in ["cw", "ccw"]:
+                                system_mode = "manual" 
+                                target_rpm = speed
+                                current_dir = direction
+                                current_duty_cycle = 0 
+                                print(f">> Action: MANUAL DRIVE {speed} RPM {direction.upper()}")
+                            else:
+                                print(f"Error: Speed must be 0-{MAX_ATTAINABLE_RPM} RPM.")
                         else:
-                            print(f"Error: Speed must be 0-{MAX_ATTAINABLE_RPM} RPM.")
-                    else:
-                        print("Error: Unknown command. Use 'auto', 'manual', or '[speed] [dir]'.")
-                except ValueError:
-                    print("Error: Could not parse input.")
+                            print("Error: Unknown command. Use 'auto', 'manual', 'ball', or '[speed] [dir]'.")
+                    except ValueError:
+                        print("Error: Could not parse input.")
 
     except KeyboardInterrupt:
         print("\n\nUser interrupted. Shutting down...")
     finally:
         # Hardware Safety Shutdown
+        ball_tracking_running = False
         picam2.stop_recording()
         rpwm.value = 0
         lpwm.value = 0

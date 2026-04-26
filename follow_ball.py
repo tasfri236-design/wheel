@@ -27,7 +27,7 @@ import requests
 from imutils.video import VideoStream
 
 
-YELLOW_LOWER_DEFAULT = (25, 80, 80)
+YELLOW_LOWER_DEFAULT = (25, 50, 50)
 YELLOW_UPPER_DEFAULT = (45, 255, 255)
 
 MIN_RADIUS_PX = 8
